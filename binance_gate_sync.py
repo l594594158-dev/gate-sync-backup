@@ -172,22 +172,19 @@ class PositionSync:
             # 差异小于0.5，跳过
             pass
         elif diff > 0:
-            # 需要开多
+            # 需要增加多头
             self._open_long(diff)
         elif diff < 0:
-            # 需要开空(或者平多)
+            # 需要减少多头或转向
             if gate_net > 0:
-                # 先平多
                 self._close_all(gate_net)
-            # 再开空
-            self._open_short(abs(diff))
-        
-        # 处理净空情况
-        if binance_net < 0 and gate_net >= 0:
-            # 币安净空，Gate无空或有多，需要开空
-            target = abs(target_contracts)
-            if target > 0 and target > gate_net:
-                self._open_short(target - gate_net)
+            elif gate_net < 0:
+                self._close_all(gate_net)
+            # 只在目标不为零时重新开仓
+            if target_contracts > 0:
+                self._open_long(target_contracts)
+            elif target_contracts < 0:
+                self._open_short(abs(target_contracts))
 
     def run(self):
         logger.info("开始监控币安 -> Gate.io 仓位同步")
