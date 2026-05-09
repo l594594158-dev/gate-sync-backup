@@ -7,6 +7,8 @@
 
 import time
 import logging
+import subprocess
+import os
 from binance.client import Client as BinanceClient
 from gate_api.configuration import Configuration
 from gate_api.api_client import ApiClient
@@ -24,7 +26,11 @@ GATE_CONTRACT = "BTC_USDT"
 LEVERAGE = 20
 CONTRACT_RATIO = 10000  # 币安BTC / Gate 0.0001BTC
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s',
+                    handlers=[
+                        logging.FileHandler('/tmp/sync.log'),
+                        logging.StreamHandler()
+                    ])
 logger = logging.getLogger(__name__)
 
 # 币安仓位日志
@@ -42,6 +48,9 @@ class PositionSync:
         self.gate = FuturesApi(self.gate_client)
         self._initialized = False
         self._price = None
+        self.last_binance_net = None  # 上一次币安净持仓（None=首次运行）
+        self._alert_log = '/tmp/position_alerts.log'
+        self._count_file = '/tmp/position_count.txt'
         logger.info("初始化完成")
         self._init_gate()
 
@@ -70,18 +79,22 @@ class PositionSync:
         except:
             return self._price if self._price else 0
 
-    def _get_binance_net(self):
-        """获取币安净持仓(BTC)"""
+    def _get_binance_position(self):
+        """获取币安净持仓(BTC)和开仓价"""
         try:
             account = self.binance.futures_account()
             net_btc = 0
+            entry_price = 0
             for p in account['positions']:
                 if p['symbol'] == SYMBOL:
-                    net_btc += float(p['positionAmt'])  # 正=多, 负=空
-            return net_btc
+                    amt = float(p['positionAmt'])
+                    net_btc += amt  # 正=多, 负=空
+                    if amt != 0:
+                        entry_price = float(p['entryPrice'])
+            return net_btc, entry_price
         except Exception as e:
             logger.error(f"获取币安持仓: {e}")
-            return 0
+            return 0, 0
 
     def _get_gate_net(self):
         """获取Gate净持仓(合约)"""
@@ -148,12 +161,88 @@ class PositionSync:
         except Exception as e:
             logger.error(f"平仓失败: {e}")
 
+    def _get_position_count(self):
+        """读取累计开仓次数"""
+        try:
+            with open(self._count_file, 'r') as f:
+                return int(f.read().strip())
+        except:
+            return 0
+
+    def _increment_position_count(self):
+        """递增并返回累计开仓次数"""
+        count = self._get_position_count() + 1
+        with open(self._count_file, 'w') as f:
+            f.write(str(count))
+        return count
+
+    def _send_notification(self, direction, qty_btc, total_btc, entry_price, cumulative_count):
+        """生成开仓通知并推送"""
+        if direction == "long":
+            direction_line = "方向: 🟢【做多-LONG】📈"
+            qty_sign = "+"
+        else:
+            direction_line = "方向: 🔴【做空-SHORT】📉"
+            qty_sign = "+"
+
+        msg = (
+            f"🚨 BTC开仓通知（累计{cumulative_count}仓）\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"{direction_line}\n"
+            f"杠杆: {LEVERAGE}x\n"
+            f"数量: {qty_sign}{qty_btc} BTC（合计 {total_btc} BTC）\n"
+            f"开仓价: ${entry_price:,.2f}\n"
+            f"━━━━━━━━━━━━━━━━"
+        )
+
+        # 写入通知日志
+        with open(self._alert_log, 'a') as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+
+        # 异步推送（通过 openclaw CLI，超时5秒）
+        try:
+            subprocess.Popen(
+                ['openclaw', 'message', 'send', '--channel', 'wecom',
+                 '--target', 'LiuGang', '--message', msg],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            logger.info(f"📢 已发送开仓通知: {direction} {qty_btc}BTC @ ${entry_price:,.2f}")
+        except Exception as e:
+            logger.warning(f"通知推送失败: {e}，已写入日志")
+
+    def _check_and_notify(self, binance_net, entry_price):
+        """检测仓位变化并发送通知"""
+        if self.last_binance_net is None:
+            # 首次运行，仅记录状态
+            return
+
+        prev = self.last_binance_net
+        curr = binance_net
+
+        # 从 0 → 非0：新开仓
+        if prev == 0 and curr != 0:
+            direction = "long" if curr > 0 else "short"
+            count = self._increment_position_count()
+            self._send_notification(direction, abs(curr), abs(curr), entry_price, count)
+        # 方向翻转：先平后开
+        elif prev != 0 and curr != 0 and ((prev > 0 and curr < 0) or (prev < 0 and curr > 0)):
+            direction = "long" if curr > 0 else "short"
+            count = self._increment_position_count()
+            self._send_notification(direction, abs(curr), abs(curr), entry_price, count)
+
     def sync_positions(self):
         self._init_gate()
         
-        # 获取净持仓
-        binance_net = self._get_binance_net()  # BTC (正=多, 负=空)
-        gate_net = self._get_gate_net()        # 合约 (正=多, 负=空)
+        # 获取净持仓和开仓价
+        binance_net, entry_price = self._get_binance_position()
+        gate_net = self._get_gate_net()
+        
+        # ── 仓位变化检测与通知 ──
+        self._check_and_notify(binance_net, entry_price)
+        # 更新上次仓位（仅当仓位确实变化时）
+        if self.last_binance_net is None or self.last_binance_net != binance_net:
+            self.last_binance_net = binance_net
         
         # 转换目标合约数
         target_contracts = round(binance_net * CONTRACT_RATIO)
