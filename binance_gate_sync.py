@@ -7,7 +7,6 @@
 
 import time
 import logging
-import subprocess
 import os
 from binance.client import Client as BinanceClient
 from gate_api.configuration import Configuration
@@ -201,8 +200,8 @@ class PositionSync:
             f.write(str(count))
         return count
 
-    def _send_notification(self, direction, qty_btc, total_btc, entry_price, cumulative_count):
-        """生成开仓通知并推送"""
+    def _write_notification(self, direction, qty_btc, total_btc, entry_price, cumulative_count, event_type):
+        """写入通知信号文件（由外部监控进程负责推送）"""
         if direction == "long":
             direction_line = "方向: 🟢【做多-LONG】📈"
             qty_sign = "+"
@@ -211,7 +210,7 @@ class PositionSync:
             qty_sign = "+"
 
         msg = (
-            f"🚨 BTC开仓通知（累计{cumulative_count}仓）\n"
+            f"🚨 BTC{event_type}通知（累计{cumulative_count}仓）\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"{direction_line}\n"
             f"杠杆: {LEVERAGE}x\n"
@@ -224,37 +223,74 @@ class PositionSync:
         with open(self._alert_log, 'a') as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
-        # 异步推送（通过 openclaw CLI，超时5秒）
+        # 写入信号文件（JSON，供外部监控进程读取）
+        import json as _json
+        signal = {
+            "timestamp": time.time(),
+            "direction": direction,
+            "qty_btc": qty_btc,
+            "total_btc": total_btc,
+            "entry_price": entry_price,
+            "cumulative_count": cumulative_count,
+            "event_type": event_type,
+            "message": msg
+        }
+        with open('/tmp/position_notify.json', 'w') as f:
+            _json.dump(signal, f, ensure_ascii=False)
+
+        # 也尝试 delivery-queue（当 Bot WS 恢复时自动送达）
         try:
-            subprocess.Popen(
-                ['openclaw', 'message', 'send', '--channel', 'wecom',
-                 '--target', 'LiuGang', '--message', msg],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
-            logger.info(f"📢 已发送开仓通知: {direction} {qty_btc}BTC @ ${entry_price:,.2f}")
-        except Exception as e:
-            logger.warning(f"通知推送失败: {e}，已写入日志")
+            import uuid as _uuid
+            queue_entry = {
+                "channel": "wecom",
+                "to": "LiuGang",
+                "payloads": [{"text": msg}]
+            }
+            queue_path = f"/root/.openclaw/delivery-queue/{_uuid.uuid4()}.json"
+            with open(queue_path, 'w') as f:
+                _json.dump(queue_entry, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+        logger.info(f"📢 已写入开仓信号: {direction} {qty_btc}BTC(合计{total_btc}BTC) @ ${entry_price:,.2f}")
 
     def _check_and_notify(self, binance_net, entry_price):
-        """检测仓位变化并发送通知"""
+        """检测仓位变化并发送通知。
+        覆盖四种场景：新开仓 / 加仓 / 减仓 / 方向翻转"""
         if self.last_binance_net is None:
             # 首次运行，仅记录状态
             return
 
         prev = self.last_binance_net
         curr = binance_net
+        prev_abs = abs(prev)
+        curr_abs = abs(curr)
 
-        # 从 0 → 非0：新开仓
+        # 场景1: 从 0 → 非0 → 新开仓
         if prev == 0 and curr != 0:
             direction = "long" if curr > 0 else "short"
             count = self._increment_position_count()
-            self._send_notification(direction, abs(curr), abs(curr), entry_price, count)
-        # 方向翻转：先平后开
+            self._write_notification(direction, curr_abs, curr_abs, entry_price, count, "开仓")
+
+        # 场景2: 方向翻转（先平后反向开）
         elif prev != 0 and curr != 0 and ((prev > 0 and curr < 0) or (prev < 0 and curr > 0)):
             direction = "long" if curr > 0 else "short"
             count = self._increment_position_count()
-            self._send_notification(direction, abs(curr), abs(curr), entry_price, count)
+            self._write_notification(direction, curr_abs, curr_abs, entry_price, count, "翻转开仓")
+
+        # 场景3: 同向加仓（|curr| > |prev|）
+        elif prev != 0 and curr != 0 and ((prev > 0 and curr > 0) or (prev < 0 and curr < 0)):
+            if curr_abs > prev_abs and (curr_abs - prev_abs) >= 0.001:
+                direction = "long" if curr > 0 else "short"
+                added = round(curr_abs - prev_abs, 4)
+                count = self._increment_position_count()
+                self._write_notification(direction, added, curr_abs, entry_price, count, "加仓")
+
+            # 场景4: 同向减仓（|curr| < |prev|）— 仅记录，不推送计数
+            elif curr_abs < prev_abs and (prev_abs - curr_abs) >= 0.001:
+                reduced = round(prev_abs - curr_abs, 4)
+                side = "多" if curr > 0 else ("空" if curr < 0 else "平仓")
+                logger.info(f"📉 仓位减少: {side} -{reduced}BTC, 剩余 {curr_abs}BTC")
 
     def sync_positions(self):
         self._init_gate()
