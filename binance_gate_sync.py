@@ -80,21 +80,46 @@ class PositionSync:
             return self._price if self._price else 0
 
     def _get_binance_position(self):
-        """获取币安净持仓(BTC)和开仓价"""
+        """获取币安净持仓(BTC)和开仓价。
+        异常或数据校验失败时返回 (None, None)，调用方必须跳过本轮同步。"""
         try:
             account = self.binance.futures_account()
-            net_btc = 0
-            entry_price = 0
-            for p in account['positions']:
+
+            # ── Layer 2: 响应结构校验 ──
+            if not isinstance(account, dict):
+                logger.error(f"币安API响应类型异常: {type(account)}")
+                return None, None
+            if 'positions' not in account:
+                logger.error("币安API响应缺少 positions 字段")
+                return None, None
+            positions = account['positions']
+            if not isinstance(positions, list) or len(positions) == 0:
+                logger.error(f"币安API positions 为空或非列表: {type(positions)}")
+                return None, None
+
+            # 查找 BTCUSDT
+            btc_position = None
+            for p in positions:
+                if not isinstance(p, dict) or 'symbol' not in p:
+                    continue
                 if p['symbol'] == SYMBOL:
-                    amt = float(p['positionAmt'])
-                    net_btc += amt  # 正=多, 负=空
-                    if amt != 0:
-                        entry_price = float(p['entryPrice'])
-            return net_btc, entry_price
+                    btc_position = p
+                    break
+
+            if btc_position is None:
+                logger.error(f"币安API positions 中未找到 {SYMBOL}")
+                return None, None
+            if 'positionAmt' not in btc_position:
+                logger.error("币安API BTCUSDT 仓位缺少 positionAmt 字段")
+                return None, None
+
+            amt = float(btc_position['positionAmt'])
+            entry_price = float(btc_position.get('entryPrice', 0)) if amt != 0 else 0
+            return amt, entry_price
+
         except Exception as e:
-            logger.error(f"获取币安持仓: {e}")
-            return 0, 0
+            logger.error(f"获取币安持仓异常: {e}")
+            return None, None
 
     def _get_gate_net(self):
         """获取Gate净持仓(合约)"""
@@ -236,6 +261,9 @@ class PositionSync:
         
         # 获取净持仓和开仓价
         binance_net, entry_price = self._get_binance_position()
+        if binance_net is None:
+            logger.warning("币安持仓数据不可靠，跳过本轮同步")
+            return  # Layer 1: 异常时拒绝行动
         gate_net = self._get_gate_net()
         
         # ── 仓位变化检测与通知 ──
