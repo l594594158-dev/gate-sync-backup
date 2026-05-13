@@ -80,33 +80,20 @@ class PositionSync:
 
     def _get_binance_position(self):
         """获取币安净持仓(BTC)和开仓价。
+        使用 futures_position_information 避免 futures_account 返回
+        同一 symbol 多条记录（如双向持仓残留零值条目）导致的误读。
         异常或数据校验失败时返回 (None, None)，调用方必须跳过本轮同步。"""
         try:
-            account = self.binance.futures_account()
+            positions = self.binance.futures_position_information(symbol=SYMBOL)
 
             # ── Layer 2: 响应结构校验 ──
-            if not isinstance(account, dict):
-                logger.error(f"币安API响应类型异常: {type(account)}")
-                return None, None
-            if 'positions' not in account:
-                logger.error("币安API响应缺少 positions 字段")
-                return None, None
-            positions = account['positions']
             if not isinstance(positions, list) or len(positions) == 0:
                 logger.error(f"币安API positions 为空或非列表: {type(positions)}")
                 return None, None
 
-            # 查找 BTCUSDT
-            btc_position = None
-            for p in positions:
-                if not isinstance(p, dict) or 'symbol' not in p:
-                    continue
-                if p['symbol'] == SYMBOL:
-                    btc_position = p
-                    break
-
-            if btc_position is None:
-                logger.error(f"币安API positions 中未找到 {SYMBOL}")
+            btc_position = positions[0]
+            if not isinstance(btc_position, dict):
+                logger.error(f"币安API position 元素类型异常: {type(btc_position)}")
                 return None, None
             if 'positionAmt' not in btc_position:
                 logger.error("币安API BTCUSDT 仓位缺少 positionAmt 字段")
