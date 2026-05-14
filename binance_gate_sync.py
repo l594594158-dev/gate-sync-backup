@@ -87,9 +87,12 @@ class PositionSync:
             positions = self.binance.futures_position_information(symbol=SYMBOL)
 
             # ── Layer 2: 响应结构校验 ──
-            if not isinstance(positions, list) or len(positions) == 0:
-                logger.error(f"币安API positions 为空或非列表: {type(positions)}")
+            if not isinstance(positions, list):
+                logger.error(f"币安API positions 非列表: {type(positions)}")
                 return None, None
+            if len(positions) == 0:
+                # 空列表 = 该 symbol 无持仓，合法状态，返回零仓位
+                return 0, 0
 
             btc_position = positions[0]
             if not isinstance(btc_position, dict):
