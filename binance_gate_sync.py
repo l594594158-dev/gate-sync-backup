@@ -312,18 +312,27 @@ class PositionSync:
         diff = target_contracts - gate_net
         
         if abs(diff) < 0.5:
-            # 差异小于0.5，跳过
+            # 差异小于0.5合约，跳过
             pass
-        elif diff > 0:
-            # 需要增加多头
-            self._open_long(diff)
-        elif diff < 0:
-            # 需要减少多头或转向
-            if gate_net > 0:
+
+        # ── 同向多头：增仓或减仓 ──
+        elif gate_net > 0 and target_contracts > 0:
+            if target_contracts > gate_net:
+                self._open_long(target_contracts - gate_net)
+            else:
+                self._open_short(gate_net - target_contracts)
+
+        # ── 同向空头：增仓或减仓 ──
+        elif gate_net < 0 and target_contracts < 0:
+            if target_contracts < gate_net:
+                self._open_short(abs(target_contracts) - abs(gate_net))
+            else:
+                self._open_long(abs(gate_net) - abs(target_contracts))
+
+        # ── 方向翻转 或 零↔非零 ──
+        else:
+            if gate_net != 0:
                 self._close_all(gate_net)
-            elif gate_net < 0:
-                self._close_all(gate_net)
-            # 只在目标不为零时重新开仓
             if target_contracts > 0:
                 self._open_long(target_contracts)
             elif target_contracts < 0:
