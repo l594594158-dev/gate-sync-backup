@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """
-币安 -> Gate.io 仓位同步监控
+币安 -> Gate.io 仓位同步监控 v14
 同步净方向（多空相抵后的方向）
 逐仓模式
+
+三进程架构:
+  sync    — 仓位同步 + 写入告警队列 /tmp/alert_queue.jsonl
+  notifier — 读取队列 → openclaw message send → 推送到企业微信
+  watchdog — 监控 sync + notifier 健康，异常自动重启
 """
 
 import time
+import json
 import logging
 import os
+import sys
 from binance.client import Client as BinanceClient
 from gate_api.configuration import Configuration
 from gate_api.api_client import ApiClient
 from gate_api.api.futures_api import FuturesApi
 from gate_api.models import FuturesOrder
 
-# 配置
+# ── 配置 ──
 BINANCE_API_KEY = "yoIUcS0f687fbduzdLGRHgECeexVmnvVjhegkPeVYrACvRVYuFJWSJDjfhgBE8ww"
 BINANCE_SECRET_KEY = "BpsTBrNNQ6T4r35GNKhA6uWRg4asAu1cRuGOzF7jYM5GRR32kUPHluiis7XXyZ8t"
 GATE_API_KEY = "6798f83ac4f0952585c8fbc28f649320"
@@ -25,6 +32,10 @@ GATE_CONTRACT = "BTC_USDT"
 LEVERAGE = 20
 CONTRACT_RATIO = 10000  # 币安BTC / Gate 0.0001BTC
 
+# ── PID 文件 ──
+PID_FILE = "/tmp/sync.pid"
+
+# ── 日志 ──
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s',
                     handlers=[
                         logging.FileHandler('/tmp/sync.log'),
@@ -39,6 +50,12 @@ log_handler = logging.FileHandler('/tmp/binance_positions.log')
 log_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
 binance_log.addHandler(log_handler)
 
+
+def write_pid():
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+
 class PositionSync:
     def __init__(self):
         self.binance = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET_KEY)
@@ -50,7 +67,8 @@ class PositionSync:
         self.last_binance_net = None  # 上一次币安净持仓（None=首次运行）
         self._alert_log = '/tmp/position_alerts.log'
         self._count_file = '/tmp/position_count.txt'
-        logger.info("初始化完成")
+        self._queue_file = '/tmp/alert_queue.jsonl'
+        logger.info("初始化完成 (v14 三进程架构: sync)")
         self._init_gate()
 
     def _init_gate(self):
@@ -79,19 +97,13 @@ class PositionSync:
             return self._price if self._price else 0
 
     def _get_binance_position(self):
-        """获取币安净持仓(BTC)和开仓价。
-        使用 futures_position_information 避免 futures_account 返回
-        同一 symbol 多条记录（如双向持仓残留零值条目）导致的误读。
-        异常或数据校验失败时返回 (None, None)，调用方必须跳过本轮同步。"""
+        """获取币安净持仓(BTC)和开仓价。"""
         try:
             positions = self.binance.futures_position_information(symbol=SYMBOL)
-
-            # ── Layer 2: 响应结构校验 ──
             if not isinstance(positions, list):
                 logger.error(f"币安API positions 非列表: {type(positions)}")
                 return None, None
             if len(positions) == 0:
-                # 空列表 = 该 symbol 无持仓，合法状态，返回零仓位
                 return 0, 0
 
             btc_position = positions[0]
@@ -116,7 +128,7 @@ class PositionSync:
             positions = self.gate.list_positions(settle="usdt")
             for p in positions:
                 if p.contract == GATE_CONTRACT:
-                    return float(p.size)  # 正=多, 负=空
+                    return float(p.size)
             return 0
         except Exception as e:
             logger.error(f"获取Gate持仓: {e}")
@@ -159,16 +171,14 @@ class PositionSync:
     def _close_all(self, current_contracts):
         """平掉所有仓位"""
         if abs(current_contracts) < 0.5:
-            return  # 小于0.5合约视为0
+            return
         try:
             price = self._get_price()
             if current_contracts > 0:
-                # 平多
                 order = FuturesOrder(contract=GATE_CONTRACT, size=str(-int(current_contracts)), price=str(price), tif="ioc")
                 self.gate.create_futures_order(settle="usdt", futures_order=order)
                 logger.info(f"平多: {int(current_contracts)}合约")
             else:
-                # 平空
                 order = FuturesOrder(contract=GATE_CONTRACT, size=str(abs(int(current_contracts))), price=str(price), tif="ioc")
                 self.gate.create_futures_order(settle="usdt", futures_order=order)
                 logger.info(f"平空: {abs(int(current_contracts))}合约")
@@ -190,8 +200,11 @@ class PositionSync:
             f.write(str(count))
         return count
 
-    def _write_notification(self, direction, qty_btc, total_btc, entry_price, cumulative_count, event_type):
-        """写入通知信号文件（由外部监控进程负责推送）"""
+    def _push_alert(self, direction, qty_btc, total_btc, entry_price, cumulative_count, event_type):
+        """
+        推送开仓告警到队列文件。
+        notifier 进程独立读取此队列并通过 openclaw message send 推送到企业微信。
+        """
         if direction == "long":
             direction_line = "方向: 🟢【做多-LONG】📈"
             qty_sign = "+"
@@ -209,14 +222,13 @@ class PositionSync:
             f"━━━━━━━━━━━━━━━━"
         )
 
-        # 写入通知日志
+        # 写入审计日志（本地留底）
         with open(self._alert_log, 'a') as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
 
-        # 写入信号文件（JSON，供外部监控进程读取）
-        import json as _json
-        signal = {
-            "timestamp": time.time(),
+        # 写入告警队列（notifier 进程独立消费）
+        alert_record = {
+            "ts": time.time(),
             "direction": direction,
             "qty_btc": qty_btc,
             "total_btc": total_btc,
@@ -225,30 +237,15 @@ class PositionSync:
             "event_type": event_type,
             "message": msg
         }
-        with open('/tmp/position_notify.json', 'w') as f:
-            _json.dump(signal, f, ensure_ascii=False)
+        with open(self._queue_file, 'a') as f:
+            f.write(json.dumps(alert_record, ensure_ascii=False) + '\n')
 
-        # 也尝试 delivery-queue（当 Bot WS 恢复时自动送达）
-        try:
-            import uuid as _uuid
-            queue_entry = {
-                "channel": "wecom",
-                "to": "LiuGang",
-                "payloads": [{"text": msg}]
-            }
-            queue_path = f"/root/.openclaw/delivery-queue/{_uuid.uuid4()}.json"
-            with open(queue_path, 'w') as f:
-                _json.dump(queue_entry, f, ensure_ascii=False)
-        except Exception:
-            pass
-
-        logger.info(f"📢 已写入开仓信号: {direction} {qty_btc}BTC(合计{total_btc}BTC) @ ${entry_price:,.2f}")
+        logger.info(f"📢 告警已入队: {direction} {qty_btc}BTC (合计{total_btc}BTC) @ ${entry_price:,.2f}")
 
     def _check_and_notify(self, binance_net, entry_price):
-        """检测仓位变化并发送通知。
+        """检测仓位变化并写入通知队列。
         覆盖四种场景：新开仓 / 加仓 / 减仓 / 方向翻转"""
         if self.last_binance_net is None:
-            # 首次运行，仅记录状态
             return
 
         prev = self.last_binance_net
@@ -260,23 +257,23 @@ class PositionSync:
         if prev == 0 and curr != 0:
             direction = "long" if curr > 0 else "short"
             count = self._increment_position_count()
-            self._write_notification(direction, curr_abs, curr_abs, entry_price, count, "开仓")
+            self._push_alert(direction, curr_abs, curr_abs, entry_price, count, "开仓")
 
-        # 场景2: 方向翻转（先平后反向开）
+        # 场景2: 方向翻转
         elif prev != 0 and curr != 0 and ((prev > 0 and curr < 0) or (prev < 0 and curr > 0)):
             direction = "long" if curr > 0 else "short"
             count = self._increment_position_count()
-            self._write_notification(direction, curr_abs, curr_abs, entry_price, count, "翻转开仓")
+            self._push_alert(direction, curr_abs, curr_abs, entry_price, count, "翻转开仓")
 
-        # 场景3: 同向加仓（|curr| > |prev|）
+        # 场景3: 同向加仓
         elif prev != 0 and curr != 0 and ((prev > 0 and curr > 0) or (prev < 0 and curr < 0)):
             if curr_abs > prev_abs and (curr_abs - prev_abs) >= 0.001:
                 direction = "long" if curr > 0 else "short"
                 added = round(curr_abs - prev_abs, 4)
                 count = self._increment_position_count()
-                self._write_notification(direction, added, curr_abs, entry_price, count, "加仓")
+                self._push_alert(direction, added, curr_abs, entry_price, count, "加仓")
 
-            # 场景4: 同向减仓（|curr| < |prev|）— 仅记录，不推送计数
+            # 场景4: 同向减仓 — 仅记录
             elif curr_abs < prev_abs and (prev_abs - curr_abs) >= 0.001:
                 reduced = round(prev_abs - curr_abs, 4)
                 side = "多" if curr > 0 else ("空" if curr < 0 else "平仓")
@@ -284,35 +281,30 @@ class PositionSync:
 
     def sync_positions(self):
         self._init_gate()
-        
-        # 获取净持仓和开仓价
+
         binance_net, entry_price = self._get_binance_position()
         if binance_net is None:
             logger.warning("币安持仓数据不可靠，跳过本轮同步")
-            return  # Layer 1: 异常时拒绝行动
+            return
         gate_net = self._get_gate_net()
-        
+
         # ── 仓位变化检测与通知 ──
         self._check_and_notify(binance_net, entry_price)
-        # 更新上次仓位（仅当仓位确实变化时）
         if self.last_binance_net is None or self.last_binance_net != binance_net:
             self.last_binance_net = binance_net
-        
-        # 转换目标合约数
+
         target_contracts = round(binance_net * CONTRACT_RATIO)
-        
+
         binance_side = "多" if binance_net > 0 else ("空" if binance_net < 0 else "无")
         gate_side = "多" if gate_net > 0 else ("空" if gate_net < 0 else "无")
         target_side = "多" if target_contracts > 0 else ("空" if target_contracts < 0 else "无")
-        
+
         logger.info(f"币安净:{binance_net}BTC({binance_side}) | Gate净:{gate_net}合约({gate_side}) | 目标:{target_contracts}合约({target_side})")
         binance_log.info(f"币安 {binance_side}:{abs(binance_net)}BTC -> Gate {target_side}:{abs(target_contracts)}合约")
-        
-        # 计算差异
+
         diff = target_contracts - gate_net
-        
+
         if abs(diff) < 0.5:
-            # 差异小于0.5合约，跳过
             pass
 
         # ── 同向多头：增仓或减仓 ──
@@ -339,15 +331,17 @@ class PositionSync:
                 self._open_short(abs(target_contracts))
 
     def run(self):
-        logger.info("开始监控币安 -> Gate.io 仓位同步")
-        logger.info(f"每2秒扫描 | 杠杆: {LEVERAGE}x | 同步净方向 | 逐仓模式")
-        
+        write_pid()
+        logger.info(f"开始监控 币安->Gate 仓位同步 (PID: {os.getpid()})")
+        logger.info(f"每2秒扫描 | 杠杆: {LEVERAGE}x | 同步净方向 | 逐仓模式 | v14")
+
         while True:
             try:
                 self.sync_positions()
             except Exception as e:
                 logger.error(f"同步出错: {e}")
             time.sleep(2)
+
 
 if __name__ == "__main__":
     syncer = PositionSync()
