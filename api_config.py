@@ -1,0 +1,9 @@
+# ========== 币安 API 双Key架构 ==========
+
+# 行情分析API（只读）
+READ_API_KEY = "yoIUcS0f687fbduzdLGRHgECeexVmnvVjhegkPeVYrACvRVYuFJWSJDjfhgBE8ww"
+READ_SECRET = "BpsTBrNNQ6T4r35GNKhA6uWRg4asAu1cRuGOzF7jYM5GRR32kUPHluiis7XXyZ8t"
+
+# 交易执行API（Gate交易所交易权限）
+TRADE_API_KEY = "a261449031d180a2bd5537390261a461"
+TRADE_SECRET = "b981402bbeb1f6d7f9ea878bd1972cd0cd7a900de437e5a27646c2c780837d8b"

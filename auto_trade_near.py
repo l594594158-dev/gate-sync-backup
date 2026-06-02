@@ -192,77 +192,101 @@ def check_entry(data):
 
 # ========== 双向各2仓管理 ==========
 def manage_positions(state, price, signal, reason, kl_time, indicators=None):
-    closed = False
+    """纯条件单模式: 交易所闭环, 只做状态同步"""
+    lk = 'long_poss'
+    sk = 'short_poss'
+    # ① 同步交易所 → 检测条件单已平仓
+    try:
+        positions = trade_gate.fetch_positions(symbols=[SYMBOL])
+        exch_long_ct = 0; exch_short_ct = 0
+        for p in positions:
+            if float(p.get('contracts', 0)) > 0:
+                if p.get('side') == 'long': exch_long_ct += 1
+                else: exch_short_ct += 1
 
-    # ── LONG止盈止损 (遍历所有多仓) ──
-    for lp in list(state.get('long_poss', [])):
-        pnl = (price - lp['entry']) / lp['entry']
-        if pnl <= -STOP_LOSS_PCT:
-            log(f"🛑 LONG止损 | ${lp['entry']:.4f} → ${price:.4f} ({pnl*100:+.2f}%)")
-            do_close('LONG', price, lp, '止损')
-            state['long_poss'].remove(lp)
+        lps = state.get(lk, [])
+        sps = state.get(sk, [])
+
+        if exch_long_ct < len(lps):
+            removed = len(lps) - exch_long_ct
+            if exch_long_ct > 0:
+                state[lk] = lps[:exch_long_ct]
+            else:
+                state[lk] = []
+            log(f"🔄 LONG条件单触发 -{removed}仓 (剩余{exch_long_ct})")
             state['last_exit_kl_time'] = kl_time
             save_state(state)
-            closed = True
-        elif pnl >= TAKE_PROFIT_PCT:
-            log(f"✅ LONG止盈 | ${lp['entry']:.4f} → ${price:.4f} ({pnl*100:+.2f}%)")
-            do_close('LONG', price, lp, '止盈')
-            state['long_poss'].remove(lp)
+
+        if exch_short_ct < len(sps):
+            removed = len(sps) - exch_short_ct
+            if exch_short_ct > 0:
+                state[sk] = sps[:exch_short_ct]
+            else:
+                state[sk] = []
+            log(f"🔄 SHORT条件单触发 -{removed}仓 (剩余{exch_short_ct})")
             state['last_exit_kl_time'] = kl_time
             save_state(state)
-            closed = True
 
-    # ── SHORT止盈止损 (遍历所有空仓) ──
-    for sp in list(state.get('short_poss', [])):
-        pnl = (sp['entry'] - price) / sp['entry']
-        if pnl <= -STOP_LOSS_PCT:
-            log(f"🛑 SHORT止损 | ${sp['entry']:.4f} → ${price:.4f} ({pnl*100:+.2f}%)")
-            do_close('SHORT', price, sp, '止损')
-            state['short_poss'].remove(sp)
-            state['last_exit_kl_time'] = kl_time
+        lps = state.get(lk, [])
+        sps = state.get(sk, [])
+    except Exception as e:
+        log(f"同步异常: {e}")
+        lps = state.get(lk, [])
+        sps = state.get(sk, [])
+
+    # ② 刷新条件单
+    if lps:
+        try:
+            ensure_sltp(trade_gate, SYMBOL, "LONG", lps,
+                       TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
+        except: pass
+    else:
+        try:
+            from sltp_guard import _clear_direction_orders
+            _clear_direction_orders(trade_gate, SYMBOL, "LONG", log)
+        except: pass
+
+    if sps:
+        try:
+            ensure_sltp(trade_gate, SYMBOL, "SHORT", sps,
+                       TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
+        except: pass
+    else:
+        try:
+            from sltp_guard import _clear_direction_orders
+            _clear_direction_orders(trade_gate, SYMBOL, "SHORT", log)
+        except: pass
+
+    # ③ 冷却检查
+    if kl_time <= state.get('last_exit_kl_time', 0):
+        return
+
+    # ④ 开仓
+    if signal == 'LONG' and len(lps) < MAX_POS_PER_SIDE:
+        ep = do_open('LONG', price, reason)
+        if ep:
+            if indicators:
+                log_entry('NEAR', 'LONG', ep, indicators)
+            state.setdefault(lk, []).append(
+                {'entry': ep, 'signal': reason, 'open_time': datetime.now().isoformat()})
             save_state(state)
-            closed = True
-        elif pnl >= TAKE_PROFIT_PCT:
-            log(f"✅ SHORT止盈 | ${sp['entry']:.4f} → ${price:.4f} ({pnl*100:+.2f}%)")
-            do_close('SHORT', price, sp, '止盈')
-            state['short_poss'].remove(sp)
-            state['last_exit_kl_time'] = kl_time
+            try:
+                ensure_sltp(trade_gate, SYMBOL, "LONG", state.get(lk, []),
+                           TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
+            except: pass
+    elif signal == 'SHORT' and len(sps) < MAX_POS_PER_SIDE:
+        ep = do_open('SHORT', price, reason)
+        if ep:
+            if indicators:
+                log_entry('NEAR', 'SHORT', ep, indicators)
+            state.setdefault(sk, []).append(
+                {'entry': ep, 'signal': reason, 'open_time': datetime.now().isoformat()})
             save_state(state)
-            closed = True
+            try:
+                ensure_sltp(trade_gate, SYMBOL, "SHORT", state.get(sk, []),
+                           TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
+            except: pass
 
-    # ── 新信号（每边最多2仓）──
-    if closed:
-        return closed
-    if signal == 'LONG':
-        if len(state.get('long_poss', [])) >= MAX_POS_PER_SIDE:
-            log(f"⏭ LONG信号跳过 | 已有{len(state['long_poss'])}个LONG仓")
-        else:
-            entry_price = do_open('LONG', price, reason)
-            if entry_price:
-                if indicators:
-                    indicators['tp_price'] = entry_price * (1 + TAKE_PROFIT_PCT)
-                    indicators['sl_price'] = entry_price * (1 - STOP_LOSS_PCT)
-                    log_entry('NEAR', 'LONG', entry_price, indicators)
-                state.setdefault('long_poss', []).append(
-                    {'entry': entry_price, 'signal': reason, 'open_time': datetime.now().isoformat()})
-                save_state(state)
-    elif signal == 'SHORT':
-        if len(state.get('short_poss', [])) >= MAX_POS_PER_SIDE:
-            log(f"⏭ SHORT信号跳过 | 已有{len(state['short_poss'])}个SHORT仓")
-        else:
-            entry_price = do_open('SHORT', price, reason)
-            if entry_price:
-                if indicators:
-                    indicators['tp_price'] = entry_price * (1 - TAKE_PROFIT_PCT)
-                    indicators['sl_price'] = entry_price * (1 + STOP_LOSS_PCT)
-                    log_entry('NEAR', 'SHORT', entry_price, indicators)
-                state.setdefault('short_poss', []).append(
-                    {'entry': entry_price, 'signal': reason, 'open_time': datetime.now().isoformat()})
-                save_state(state)
-
-    return closed
-
-# ========== 开仓执行 ==========
 def do_open(direction, price, reason):
     try:
         # ① 交易所级防护: 同方向总仓位≥配置量×2则拒绝
@@ -595,11 +619,6 @@ def main():
                     pass
 
             manage_positions(state, price, sig, reason, current_kl, indicators)
-            # 双保险: 重挂条件单
-            if state.get("long_poss"):
-                ensure_sltp(trade_gate, SYMBOL, "LONG", state["long_poss"], TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
-            if state.get("short_poss"):
-                ensure_sltp(trade_gate, SYMBOL, "SHORT", state["short_poss"], TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
 
             has_pos = bool(state.get('long_poss') or state.get('short_poss'))
             if has_pos:

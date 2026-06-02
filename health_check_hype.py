@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BTC合约任务自检脚本 v1.2
+HYPE合约任务自检脚本 v1.0
 - 每5分钟执行一次自动检查
 - 检查进程运行、API数据、持仓同步（自动同步）、策略状态
 - 发现问题自动修复并通知
@@ -16,23 +16,23 @@ from pathlib import Path
 
 # ========== 路径配置 ==========
 TASK_DIR = '/root/liucangyang'
-AUTO_TRADE_SCRIPT = f'{TASK_DIR}/auto_trade.py'
-STATE_FILE = f'{TASK_DIR}/databases/state.json'
-WORK_LOG = f'{TASK_DIR}/logs/work_log.txt'
-STATS_FILE = f'{TASK_DIR}/databases/trade_stats.json'
+AUTO_TRADE_SCRIPT = f'{TASK_DIR}/auto_trade_hype.py'
+STATE_FILE = f'{TASK_DIR}/databases/state_hype.json'
+WORK_LOG = f'{TASK_DIR}/logs/work_log_hype.txt'
+STATS_FILE = f'{TASK_DIR}/databases/trade_stats_hype.json'
 LOG_DIR = f'{TASK_DIR}/logs/health_check'
-FIX_LOG = f'{LOG_DIR}/fix_log.txt'
-CHECK_LOG = f'{LOG_DIR}/check_log.json'
-NOTIFY_QUEUE = f'{TASK_DIR}/databases/notify_queue.json'
+FIX_LOG = f'{LOG_DIR}/fix_log_hype.txt'
+CHECK_LOG = f'{LOG_DIR}/check_log_hype.json'
+NOTIFY_QUEUE = f'{TASK_DIR}/databases/notify_queue_hype.json'
 
 # 微信通知配置
 WECHAT_CHANNEL = 'openclaw-weixin'
 WECHAT_TARGET = 'o9cq80_h_BaEgBVnsrfqjOMF8Rug@im.wechat'
 
-# API配置（双Key架构，与auto_trade.py保持一致）
+# API配置（双Key架构，与auto_trade_hype.py保持一致）
 from api_config import TRADE_API_KEY, TRADE_SECRET
 
-SYMBOL = 'BTC/USDT:USDT'
+SYMBOL = 'HYPE/USDT:USDT'
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -96,14 +96,14 @@ class HealthChecker:
 
     # ========== 检查1: 进程状态 ==========
     def check_process(self):
-        """检查auto_trade.py进程是否正常运行"""
+        """检查auto_trade_hype.py进程是否正常运行"""
         try:
             result = subprocess.run(
                 ['ps', 'aux'], capture_output=True, text=True
             )
             python_pids = []
             for line in result.stdout.split('\n'):
-                if 'auto_trade.py' in line and 'grep' not in line and 'python3' in line:
+                if 'auto_trade_hype.py' in line and 'grep' not in line and 'python3' in line:
                     parts = line.split()
                     pid = parts[1]
                     # 找到实际的python进程（不是bash包装脚本）
@@ -139,10 +139,10 @@ class HealthChecker:
         """检查API数据获取 + 策略指标实时状态"""
         import requests as req
         try:
-            # 用Binance REST API直接获取实时数据（与auto_trade.py一致）
+            # 用Binance REST API直接获取实时数据（与auto_trade_hype.py一致）
             result = []
             for tf, limit in [('5m', 100), ('1h', 200), ('4h', 200), ('1d', 200)]:
-                url = f'https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval={tf}&limit={limit}'
+                url = f'https://fapi.binance.com/fapi/v1/klines?symbol=HYPEUSDT&interval={tf}&limit={limit}'
                 r = req.get(url, timeout=5)
                 klines = r.json()
                 data = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in klines]
@@ -211,11 +211,11 @@ class HealthChecker:
             return False
 
     # ========== 检查3: 持仓同步 ==========
-    # ========== 检查3: 持仓同步（只读，不写入state.json）==========
+    # ========== 检查3: 持仓同步（只读，不写入state_hype.json）==========
     def check_position_sync(self):
         """
-        对比交易所持仓与 auto_trade.py 写入的 state.json，只汇报差异。
-        不再写入 state.json —— auto_trade.py 的 sync_state 自己负责同步。
+        对比交易所持仓与 auto_trade_hype.py 写入的 state_hype.json，只汇报差异。
+        不再写入 state_hype.json —— auto_trade_hype.py 的 sync_state 自己负责同步。
         """
         try:
             binance = get_binance()
@@ -281,7 +281,7 @@ class HealthChecker:
     def check_strategy(self):
         """检查策略相关文件状态"""
         try:
-            # state.json
+            # state_hype.json
             if os.path.exists(STATE_FILE):
                 with open(STATE_FILE) as f:
                     state = json.load(f)
@@ -402,18 +402,18 @@ class HealthChecker:
         """执行单个修复操作"""
         try:
             if fix_action == 'restart':
-                log('🔧 执行修复: 重启auto_trade.py...')
+                log('🔧 执行修复: 重启auto_trade_hype.py...')
                 # 杀掉所有相关进程
-                subprocess.run(['pkill', '-f', 'auto_trade.py'], capture_output=True)
+                subprocess.run(['pkill', '-f', 'auto_trade_hype.py'], capture_output=True)
                 time.sleep(2)
                 # 重启
                 subprocess.Popen(
-                    f'cd {TASK_DIR} && python3 -u auto_trade.py > logs/auto_trade_$(date +%Y%m%d_%H%M%S).log 2>&1 &',
+                    f'cd {TASK_DIR} && python3 -u auto_trade_hype.py > logs/auto_trade_$(date +%Y%m%d_%H%M%S).log 2>&1 &',
                     shell=True,
                     preexec_fn=os.setsid
                 )
-                log('✅ auto_trade.py 已重启')
-                return '已重启auto_trade.py'
+                log('✅ auto_trade_hype.py 已重启')
+                return '已重启auto_trade_hype.py'
 
             elif fix_action == 'sync_ghost':
                 log('🔧 执行修复: 同步幽灵仓位...')
@@ -508,7 +508,7 @@ class HealthChecker:
 
     def run(self):
         log('=' * 60)
-        log('🔍 BTC合约任务自检开始')
+        log('🔍 HYPE合约任务自检开始')
         log('=' * 60)
 
         # 清空上次的修复计划
