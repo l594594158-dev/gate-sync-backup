@@ -34,7 +34,7 @@ trade_gate = ccxt.gate({
 
 # ========== NEAR专属参数 ==========
 SYMBOL = 'NEAR/USDT:USDT'
-GATE_BASE_QTY = 220                   # NEAR 数量（Gate合约: 1 NEAR/张）
+GATE_BASE_QTY = 100                   # NEAR 数量（Gate合约: 1 NEAR/张）
 GATE_CONTRACT_SIZE = 1.0  # Gate NEAR合约面值
 def to_contracts(amt): return int(amt / GATE_CONTRACT_SIZE)
 def to_base(contracts): return contracts * GATE_CONTRACT_SIZE
