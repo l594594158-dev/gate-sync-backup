@@ -408,7 +408,7 @@ def print_status(data, state):
 def main():
     log(f"🚀 ZEC v2.0 EMA交叉 启动 | {LEVERAGE}x | {GATE_BASE_QTY}ZEC/仓 | {MAX_POS_PER_SIDE}仓/边")
     log(f"策略: 1h EMA5/10交叉 | TP{TAKE_PROFIT_PCT*100:.1f}%/SL{STOP_LOSS_PCT*100:.1f}%")
-    log(f"回测: +125.8%/703笔/60.5%/DD-40.3%/3亏月")
+    log(f"回测: +189.2%/803笔/60.6%/DD-37.7%/3亏月")
 
     # 设置杠杆 + 逐仓
     try:
