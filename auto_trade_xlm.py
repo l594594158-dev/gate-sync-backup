@@ -426,7 +426,7 @@ def main():
                     sig = None; reason = f"仓位已满"
 
             manage_positions(state, price, sig, reason, current_kl, indicators)
-            print_status(data, state)
+            print_status(r, state)
             time.sleep(POLL_INTERVAL)
 
         except KeyboardInterrupt:
