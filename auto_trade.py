@@ -210,6 +210,8 @@ def manage_positions(state, price, signal, reason, kl_time, indicators=None):
 
     if kl_time <= state.get('last_exit_kl_time', 0):
         return
+    if kl_time <= state.get('last_entry_kl_time', 0):
+        return  # 同K线已开过仓,等换棒
 
     if signal == 'LONG':
         if len(state.get('long_pos', [])) >= MAX_POS_PER_SIDE:
@@ -220,6 +222,7 @@ def manage_positions(state, price, signal, reason, kl_time, indicators=None):
                 indicators['tp_price'] = ep * (1 + TAKE_PROFIT_PCT)
                 indicators['sl_price'] = ep * (1 - STOP_LOSS_PCT)
                 log_entry('BTC', 'LONG', ep, indicators)
+            state['last_entry_kl_time'] = kl_time
             state.setdefault('long_pos', []).append(
                 {'entry': ep, 'signal': reason, 'open_time': datetime.now().isoformat()})
             save_state(state)
@@ -232,6 +235,7 @@ def manage_positions(state, price, signal, reason, kl_time, indicators=None):
                 indicators['tp_price'] = ep * (1 - TAKE_PROFIT_PCT)
                 indicators['sl_price'] = ep * (1 + STOP_LOSS_PCT)
                 log_entry('BTC', 'SHORT', ep, indicators)
+            state['last_entry_kl_time'] = kl_time
             state.setdefault('short_pos', []).append(
                 {'entry': ep, 'signal': reason, 'open_time': datetime.now().isoformat()})
             save_state(state)
