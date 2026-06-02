@@ -510,7 +510,7 @@ def print_status(data, state):
 # ========== 主循环 ==========
 def main():
     log(f"🚀 NEAR v3.0 EMA+SMA10 启动 | {LEVERAGE}x | {GATE_BASE_QTY}NEAR/仓 | {MAX_POS_PER_SIDE}仓/边")
-    log(f"策略: 5mEMA5/10交叉+TP2.0%/SL4.0%+ADX25/vol2.5/无SMA (回测+149.4%/1086笔)")
+    log(f"策略: 5mEMA5/10+SMA10±1.5% | TP2.0%/SL4.0% | ADX>25 vol>2.5 (回测+168.0%/960笔/DD-33.8%)")
 
     # 设置杠杆 + 逐仓
     try:
