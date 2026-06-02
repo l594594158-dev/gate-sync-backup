@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-XLM合约 EMA5/EMA10 15m交叉策略 v5.0
-- 15m扫描 | 15m EMA5/EMA10交叉方向 | RSI/vol_ratio | ADX15m>18
-- TP 2.5% / SL 4.0% / 25x逐仓 / 1 XLM/仓 (10张, 10 XLM/张)
-- 双向各2仓 | 无4h过滤
-- 回测: +194.1%含费 / 719笔 / 68.2%胜率 / DD-51.8% / 仅2亏损月
+XLM合约 v6.1 — 15m EMA3/EMA10交叉 + ADX1h>23 3仓/边
+- 15m扫描 | 15m EMA3/EMA10纯方向 | RSI(40,60) | ADX1h>23 | vol>3.0
+- TP 2.5% / SL 4.0% / 25x逐仓 / 2000 XLM/仓
+- 双向各3仓 (回测+133.0%/310笔/69.7%胜率/DD-40.1%/4亏月)
+- v6.1: EMA3代替EMA5, ADX1h代替ADX15m, vol3.0, 3仓
 """
 import ccxt
 import requests
@@ -47,9 +47,9 @@ PAUSE_FLAG = f'{BASE_DIR}/databases/xlm_pause.flag'
 # ========== 策略参数（回测: +194.1%含费 719笔 68.2%胜率 DD-51.8%）==========
 STOP_LOSS_PCT = 4.0 / 100              # 4.0%止损
 TAKE_PROFIT_PCT = 2.5 / 100            # 2.5%止盈
-ADX_MIN = 18                           # 15m ADX下限
-VOL_MIN = 2.5                          # 15m量比下限（vol/20均量）
-MAX_POS_PER_SIDE = 2                   # 同向最多2仓
+ADX1H_MIN = 23                         # 1h ADX下限 (v6.1)
+VOL_MIN = 3.0                          # 15m量比下限 (v6.1)
+MAX_POS_PER_SIDE = 3                   # 同向最多3仓 (v6.1)
 POLL_INTERVAL = 1                      # 扫描间隔（秒）
 
 # ========== 日志 ==========
@@ -98,39 +98,49 @@ def notify_alert(msg):
 
 # ========== 数据获取 ==========
 def get_data():
-    """获取15m K线"""
+    """获取15m + 1h K线"""
     try:
-        url = f'https://fapi.binance.com/fapi/v1/klines?symbol=XLMUSDT&interval=15m&limit=200'
-        resp = requests.get(url, timeout=5)
-        klines = resp.json()
-        data = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in klines]
-        return data
+        url15 = f'https://fapi.binance.com/fapi/v1/klines?symbol=XLMUSDT&interval=15m&limit=200'
+        url1h = f'https://fapi.binance.com/fapi/v1/klines?symbol=XLMUSDT&interval=1h&limit=200'
+        resp15 = requests.get(url15, timeout=5)
+        resp1h = requests.get(url1h, timeout=5)
+        k15 = resp15.json()
+        k1h = resp1h.json()
+        d15 = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in k15]
+        d1h = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in k1h]
+        return d15, d1h
     except Exception as e:
-        log(f'获取15m失败: {e}')
-        return []
+        log(f'获取K线失败: {e}')
+        return [], []
 
 # ========== 指标计算 ==========
-def calc(df):
-    """15m指标: EMA5/10交叉方向、RSI、ADX、量比"""
-    close = df['c']; high = df['h']; low = df['l']; volume = df['v']
-    lv = len(df) - 1; closed_lv = max(0, lv - 1)
+def calc(df15, df1h):
+    """v6.1: 15m EMA3/10 + 1h ADX映射"""
+    close = df15['c']; high = df15['h']; low = df15['l']; volume = df15['v']
+    lv = len(df15) - 1; closed_lv = max(0, lv - 1)
 
-    # EMA5/EMA10 交叉 (lv-1闭K)
-    ema5 = close.ewm(span=5, adjust=False).mean()
+    # EMA3/EMA10 (lv-1闭K)
+    ema3 = close.ewm(span=3, adjust=False).mean()
     ema10 = close.ewm(span=10, adjust=False).mean()
-    ema5_closed = ema5.iloc[closed_lv]
+    ema3_closed = ema3.iloc[closed_lv]
     ema10_closed = ema10.iloc[closed_lv]
-    h1_bull = ema5_closed > ema10_closed
+    h1_bull = ema3_closed > ema10_closed
 
     # RSI (闭K)
     try: rsi = ta.momentum.RSIIndicator(close, 14).rsi().iloc[closed_lv]
     except: rsi = 50
 
-    # ADX (闭K)
-    try: adx = ta.trend.ADXIndicator(high, low, close, 14).adx().iloc[closed_lv]
-    except: adx = 25
+    # 1h ADX 映射 (取已完成1h bar)
+    import numpy as np
+    t15 = df15['t'].iloc[lv]
+    i1h = np.clip(np.searchsorted(df1h['t'], t15 - 3600000, side='right') - 1, 0, len(df1h)-1)
+    try:
+        adx1h = ta.trend.ADXIndicator(df1h['h'], df1h['l'], df1h['c'], 14).adx().iloc[i1h]
+        if np.isnan(adx1h): adx1h = 0
+    except:
+        adx1h = 0
 
-    # 量比 (lv-1闭K / 20均量)
+    # 量比 (lv-1闭K / 20均量, 含自身)
     avg_vol = volume.iloc[max(0, closed_lv-19):closed_lv+1].mean()
     cur_vol = volume.iloc[closed_lv]
     vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1
@@ -139,12 +149,12 @@ def calc(df):
         'price': close.iloc[lv],
         'close_lv': close.iloc[closed_lv],
         'h1_bull': h1_bull,
-        'ema5': ema5_closed,
+        'ema3': ema3_closed,
         'ema10': ema10_closed,
         'rsi': rsi,
-        'adx': adx,
+        'adx1h': adx1h,
         'vol_ratio': vol_ratio,
-        'open': df['o'].iloc[lv]
+        'open': df15['o'].iloc[lv]
     }
 
 # ========== 信号判断 ==========
@@ -332,12 +342,12 @@ def sync_state(state):
 
 # ========== 状态显示 ==========
 def print_status(data, state):
-    r = data; price = r['price']; rsi = r['rsi']; adx = r['adx']; vol = r['vol_ratio']
+    r = data; price = r['price']; rsi = r['rsi']; adx1h = r['adx1h']; vol = r['vol_ratio']
     dir_txt = '📈多' if r['h1_bull'] else '📉空'
     now = datetime.now().strftime('%H:%M:%S')
-    print(f"\n╔══ XLM v5.0 EMA交叉 15m {now} ═══")
-    print(f"║ 💰 {price:>10.5f} | RSI:{rsi:.1f} | EMA5:{r['ema5']:.5f} EMA10:{r['ema10']:.5f}")
-    print(f"║ {dir_txt} | ADX:{adx:.1f} | vol:{vol:.1f}x")
+    print(f"\n╔══ XLM v6.1 EMA3/10 15m {now} ═══")
+    print(f"║ 💰 {price:>10.5f} | RSI:{rsi:.1f} | EMA3:{r['ema3']:.5f} EMA10:{r['ema10']:.5f}")
+    print(f"║ {dir_txt} | ADX1h:{adx1h:.1f} | vol:{vol:.1f}x")
     lp = state.get('long_pos', []); sp = state.get('short_pos', [])
     if lp:
         for i, p in enumerate(lp):
@@ -354,9 +364,9 @@ def print_status(data, state):
 
 # ========== 主循环 ==========
 def main():
-    log(f"🚀 XLM v5.0 EMA交叉 启动 | {LEVERAGE}x | {GATE_BASE_QTY}XLM/仓 | {MAX_POS_PER_SIDE}仓/边")
-    log(f"策略: 15m EMA5/10 | TP{TAKE_PROFIT_PCT*100:.1f}%/SL{STOP_LOSS_PCT*100:.1f}% | ADX>{ADX_MIN} vol>{VOL_MIN}")
-    log(f"回测: +194.1%/719笔/68.2%/DD-51.8%/2亏月")
+    log(f"🚀 XLM v6.1 EMA3/10 启动 | {LEVERAGE}x | {GATE_BASE_QTY}XLM/仓 | {MAX_POS_PER_SIDE}仓/边")
+    log(f"策略: 15m EMA3/10 | TP{TAKE_PROFIT_PCT*100:.1f}%/SL{STOP_LOSS_PCT*100:.1f}% | ADX1h>{ADX1H_MIN} vol>{VOL_MIN}")
+    log(f"回测: +133.0%/310笔/69.7%/DD-40.1%/4亏月")
 
     try:
         trade_gate.set_margin_mode('isolated', SYMBOL)
@@ -374,18 +384,19 @@ def main():
 
     while True:
         try:
-            klines = get_data()
-            if not klines:
+            klines, klines_1h = get_data()
+            if not klines or not klines_1h:
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            df = pd.DataFrame(klines, columns=['t','o','h','l','c','v'])
-            data = calc(df)
+            df15 = pd.DataFrame(klines, columns=['t','o','h','l','c','v'])
+            df1h = pd.DataFrame(klines_1h, columns=['t','o','h','l','c','v'])
+            r = calc(df15, df1h)
 
             state = load_state()
-            price = data['price']
+            price = r['price']
 
-            result = check_entry(data)
+            result = check_entry(r)
             if result[0] is not None:
                 sig, reason, indicators = result
             else:
@@ -393,7 +404,7 @@ def main():
                 indicators = None
 
             # 冷却期
-            current_kl = int(df['t'].iloc[-2])
+            current_kl = int(df15['t'].iloc[-2])
             if sig and current_kl <= state.get('last_exit_kl_time', 0):
                 sig = None; reason = f"冷却中"
 
