@@ -33,7 +33,7 @@ trade_gate = ccxt.gate({
 
 # ========== ZEC专属参数 ==========
 SYMBOL = 'ZEC/USDT:USDT'
-GATE_BASE_QTY = 1                      # ZEC 数量（Gate合约: 0.01 ZEC/张）
+GATE_BASE_QTY = 0.5                    # ZEC 数量（Gate合约: 0.01 ZEC/张）
 GATE_CONTRACT_SIZE = 0.01
 def to_contracts(amt): return int(amt / GATE_CONTRACT_SIZE)
 def to_base(contracts): return contracts * GATE_CONTRACT_SIZE
