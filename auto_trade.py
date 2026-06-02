@@ -390,7 +390,7 @@ def main():
             sig, reason = result if result[0] is not None else (None, result[1])
             indicators = result[2] if result[0] is not None else None
 
-            current_kl = int(df1h['t'].iloc[-2])
+            current_kl = int(df1h['t'].iloc[-1])  # 当前K线时间戳(含未完成)
             if sig and current_kl <= state.get('last_exit_kl_time', 0):
                 sig = None; reason = f"冷却中"
 
