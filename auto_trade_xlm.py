@@ -33,7 +33,7 @@ trade_gate = ccxt.gate({
 
 # ========== XLM专属参数 ==========
 SYMBOL = 'XLM/USDT:USDT'
-GATE_BASE_QTY = 1                      # XLM 数量 (Gate: 10 XLM/张)
+GATE_BASE_QTY = 2000                  # XLM 数量 (Gate: 10 XLM/张)
 GATE_CONTRACT_SIZE = 10
 def to_contracts(amt): return int(amt / GATE_CONTRACT_SIZE)
 def to_base(contracts): return contracts * GATE_CONTRACT_SIZE
