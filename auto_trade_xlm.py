@@ -159,30 +159,30 @@ def calc(df15, df1h):
 
 # ========== 信号判断 ==========
 def check_entry(data):
-    r = data  # 单周期, 无嵌套
+    r = data
     entry_price = r['open']
     h1_bull = r['h1_bull']
 
-    # ① ADX 15m > 18
-    adx = r['adx']
-    if adx <= ADX_MIN:
-        return None, f"观望 | ADX={adx:.1f}≤{ADX_MIN}"
+    # ① ADX1h > 23 (v6.1)
+    adx1h = r['adx1h']
+    if adx1h <= ADX1H_MIN:
+        return None, f"观望 | ADX1h={adx1h:.1f}≤{ADX1H_MIN}"
 
-    # ② 量比 > 2.5x
+    # ② 量比 > 3.0x (v6.1)
     vol_ratio = r['vol_ratio']
     if vol_ratio < VOL_MIN:
         return None, f"观望 | 缩量 vol={vol_ratio:.1f}x<{VOL_MIN}"
 
-    # ③ LONG: EMA多头 + RSI>40
+    # ③ LONG: EMA3>EMA10 + RSI>40
     rsi = r['rsi']
     if h1_bull and rsi > 40:
-        return ('LONG', f"【LONG】EMA交叉 RSI={rsi:.1f} ADX={adx:.1f} vol={vol_ratio:.1f}x",
-                {'h1_bull': h1_bull, 'adx': adx, 'rsi': rsi, 'vol_ratio': vol_ratio, 'ema5': r['ema5'], 'ema10': r['ema10']})
+        return ('LONG', f"【LONG】EMA3/10 RSI={rsi:.1f} ADX1h={adx1h:.1f} vol={vol_ratio:.1f}x",
+                {'h1_bull': h1_bull, 'adx1h': adx1h, 'rsi': rsi, 'vol_ratio': vol_ratio, 'ema3': r['ema3'], 'ema10': r['ema10']})
 
-    # SHORT: EMA空头 + RSI<60
+    # SHORT: EMA3<EMA10 + RSI<60
     if (not h1_bull) and rsi < 60:
-        return ('SHORT', f"【SHORT】EMA交叉 RSI={rsi:.1f} ADX={adx:.1f} vol={vol_ratio:.1f}x",
-                {'h1_bull': h1_bull, 'adx': adx, 'rsi': rsi, 'vol_ratio': vol_ratio, 'ema5': r['ema5'], 'ema10': r['ema10']})
+        return ('SHORT', f"【SHORT】EMA3/10 RSI={rsi:.1f} ADX1h={adx1h:.1f} vol={vol_ratio:.1f}x",
+                {'h1_bull': h1_bull, 'adx1h': adx1h, 'rsi': rsi, 'vol_ratio': vol_ratio, 'ema3': r['ema3'], 'ema10': r['ema10']})
 
     dir_txt = '多' if h1_bull else '空'
     return None, f"观望 | {dir_txt} RSI={rsi:.1f}"
