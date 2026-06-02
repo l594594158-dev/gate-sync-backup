@@ -14,6 +14,7 @@ import json
 import os
 from datetime import datetime
 from entry_logger import log_entry
+from sltp_guard import ensure_sltp
 
 # ========== API 双Key架构 ==========
 from api_config import READ_API_KEY, READ_SECRET, TRADE_API_KEY, TRADE_SECRET
@@ -594,6 +595,11 @@ def main():
                     pass
 
             manage_positions(state, price, sig, reason, current_kl, indicators)
+            # 双保险: 重挂条件单
+            if state.get("long_poss"):
+                ensure_sltp(trade_gate, SYMBOL, "LONG", state["long_poss"], TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
+            if state.get("short_poss"):
+                ensure_sltp(trade_gate, SYMBOL, "SHORT", state["short_poss"], TAKE_PROFIT_PCT, STOP_LOSS_PCT, GATE_CONTRACT_SIZE, log_fn=log)
 
             has_pos = bool(state.get('long_poss') or state.get('short_poss'))
             if has_pos:

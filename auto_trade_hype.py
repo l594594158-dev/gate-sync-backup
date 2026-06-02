@@ -15,6 +15,7 @@ import json
 import os
 from datetime import datetime
 from entry_logger import log_entry
+from sltp_guard import ensure_sltp
 
 # ========== API 双Key架构 ==========
 from api_config import READ_API_KEY, READ_SECRET, TRADE_API_KEY, TRADE_SECRET
